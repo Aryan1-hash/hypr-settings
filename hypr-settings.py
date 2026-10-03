@@ -484,6 +484,7 @@ class SettingsWindow(Adw.PreferencesWindow):
             self._guard("layout", True)
             self.combo_layout.connect("notify::selected", self._on_layout)
             self._guard("layout", False)
+            self._scroll_combo(self.combo_layout)
             g2.add(self.combo_layout)
 
         # --- Layout list with screenshots ---
@@ -632,6 +633,7 @@ class SettingsWindow(Adw.PreferencesWindow):
             self._guard("theme", True)
             self.combo_theme.connect("notify::selected", self._on_theme)
             self._guard("theme", False)
+            self._scroll_combo(self.combo_theme)
             g.add(self.combo_theme)
         else:
             g.add(Adw.ActionRow(title="No HyDE themes found"))
@@ -674,10 +676,21 @@ class SettingsWindow(Adw.PreferencesWindow):
                           if f.lower().endswith((".mp4", ".mkv", ".webm", ".mov")))
         except FileNotFoundError:
             pass
-        for v in vids:
-            path = os.path.join(LIVE_WALL_DIR, v)
-            self._row_button(gm, os.path.splitext(v)[0], "", "Set",
-                             (lambda p: lambda: self._start_live(p))(path), sensitive=installed)
+        self._vid_paths = [os.path.join(LIVE_WALL_DIR, v) for v in vids]
+        if vids:
+            self.combo_video = Adw.ComboRow(title="Video")
+            self.combo_video.set_model(Gtk.StringList.new([os.path.splitext(v)[0] for v in vids]))
+            self.combo_video.set_sensitive(installed)
+            self._scroll_combo(self.combo_video)
+            # current video selected, if any
+            cur = self._last_video()
+            if cur in self._vid_paths:
+                self.combo_video.set_selected(self._vid_paths.index(cur))
+            setb = Gtk.Button(label="Set", valign=Gtk.Align.CENTER)
+            setb.set_sensitive(installed)
+            setb.connect("clicked", lambda *_: self._start_live(self._vid_paths[self.combo_video.get_selected()]))
+            self.combo_video.add_suffix(setb)
+            gm.add(self.combo_video)
         self._row_button(gm, "Choose video…", "", "Browse", self._choose_video, sensitive=installed)
         self._row_button(gm, "Choose image…", "", "Browse", self._choose_image)
 
@@ -972,6 +985,7 @@ class SettingsWindow(Adw.PreferencesWindow):
             self._guard("tz", True)
             self.combo_tz.connect("notify::selected", self._on_tz)
             self._guard("tz", False)
+            self._scroll_combo(self.combo_tz)
             g2.add(self.combo_tz)
         return page
 
@@ -1049,6 +1063,7 @@ class SettingsWindow(Adw.PreferencesWindow):
             self._guard("prof", True)
             self.combo_prof.connect("notify::selected", self._on_profile)
             self._guard("prof", False)
+            self._scroll_combo(self.combo_prof)
             gm.add(self.combo_prof)
         else:
             gm.add(Adw.ActionRow(title="power-profiles-daemon not available"))
@@ -1323,6 +1338,25 @@ class SettingsWindow(Adw.PreferencesWindow):
         row.set_activatable_widget(btn)
         group.add(row)
         return row
+
+    def _scroll_combo(self, combo):
+        # Change the selection by scrolling the mouse wheel over the dropdown.
+        ctl = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+
+        def on_scroll(_c, _dx, dy):
+            model = combo.get_model()
+            n = model.get_n_items() if model else 0
+            if n == 0:
+                return False
+            i = combo.get_selected()
+            if dy > 0 and i < n - 1:
+                combo.set_selected(i + 1)
+            elif dy < 0 and i > 0:
+                combo.set_selected(i - 1)
+            return True
+
+        ctl.connect("scroll", on_scroll)
+        combo.add_controller(ctl)
 
     def _guard(self, key, val):
         if not hasattr(self, "_guards"):
