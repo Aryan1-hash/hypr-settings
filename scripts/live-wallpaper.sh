@@ -8,7 +8,7 @@
 # Power-save pauses decoding whenever a window covers the desktop (≈0% CPU).
 set -u
 
-DIR="${XDG_DATA_HOME:-$HOME/.local/share}/hypr-settings"
+DIR="$(cd "$(dirname "$0")" && pwd)"  # scripts live together
 SOCK="${XDG_RUNTIME_DIR:-/tmp}/mpvpaper.sock"
 STATEFILE="${XDG_CONFIG_HOME:-$HOME/.config}/hypr-settings/live-wallpaper.conf"
 LOG="$DIR/logs/live-wallpaper.log"

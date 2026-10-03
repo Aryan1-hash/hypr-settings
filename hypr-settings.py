@@ -22,17 +22,33 @@ import datetime
 import subprocess
 
 HOME = os.path.expanduser("~")
+# Where the helper scripts live — next to this file (repo / user / system install),
+# with sensible fallbacks so it works however it was installed.
+_APP_DIR = os.path.dirname(os.path.realpath(__file__))
+
+
+def _find_script(name):
+    for d in (_APP_DIR, os.path.join(_APP_DIR, "scripts"),
+              os.path.join(HOME, ".local", "share", "hypr-settings"),
+              "/usr/share/hypr-settings"):
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return os.path.join(_APP_DIR, name)
+
+
+# User data (writable): logs/backups. Separate from the (possibly read-only) app dir.
 SHARE = os.path.join(HOME, ".local", "share", "hypr-settings")
 CONF_DIR = os.path.join(HOME, ".config", "hypr-settings")
 AUTOHIDE_CONF = os.path.join(CONF_DIR, "autohide.conf")
-DAEMON = os.path.join(SHARE, "waybar-autohide.sh")
+DAEMON = _find_script("waybar-autohide.sh")
 LOG_DIR = os.path.join(SHARE, "logs")
 ACTIONS_LOG = os.path.join(LOG_DIR, "actions.log")
 BACKUP_DIR = os.path.join(LOG_DIR, "backups")
 STATERC = os.path.join(HOME, ".local", "state", "hyde", "staterc")
 THEMES_DIR = os.path.join(HOME, ".config", "hyde", "themes")
 WALLBASH_GTK = os.path.join(HOME, ".cache", "hyde", "wallbash", "gtk.css")
-LIVE_SH = os.path.join(SHARE, "live-wallpaper.sh")
+LIVE_SH = _find_script("live-wallpaper.sh")
 LIVE_WALL_DIR = os.path.join(HOME, "Videos", "live-wallpapers")
 HYDE_SHELL = os.path.join(HOME, ".local", "bin", "hyde-shell")
 WAYBAR_PY = os.path.join(HOME, ".local", "lib", "hyde", "waybar.py")

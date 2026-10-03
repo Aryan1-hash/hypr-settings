@@ -44,6 +44,12 @@ geoclue          # the location toggle
 
 ## Get it
 
+**From the AUR** (easiest, once published):
+```bash
+yay -S hypr-settings-git
+```
+
+**Or grab it manually:**
 ```bash
 git clone https://github.com/Aryan1-hash/hypr-settings.git
 cd hypr-settings

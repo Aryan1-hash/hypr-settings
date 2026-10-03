@@ -1,0 +1,52 @@
+# Maintainer: Aryan <nitinabetterone@gmail.com>
+pkgname=hypr-settings-git
+_pkgname=hypr-settings
+pkgver=1.0.r0.g0000000
+pkgrel=1
+pkgdesc="GTK4/libadwaita settings panel for HyDE + Hyprland (Waybar auto-hide, themes, wallpaper, battery, Wi-Fi, more)"
+arch=('any')
+url="https://github.com/Aryan1-hash/hypr-settings"
+license=('MIT')
+depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'waybar' 'jq' 'grim'
+         'networkmanager' 'bluez-utils' 'power-profiles-daemon')
+optdepends=('mpvpaper: live video wallpaper'
+            'socat: live-wallpaper control socket'
+            'nwg-displays: display arranger'
+            'geoclue: location toggle'
+            'hyde: the HyDE environment this is built for')
+makedepends=('git')
+provides=('hypr-settings')
+conflicts=('hypr-settings')
+source=("git+https://github.com/Aryan1-hash/hypr-settings.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_pkgname"
+  printf "1.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm755 hypr-settings.py            "$pkgdir/usr/share/hypr-settings/hypr-settings.py"
+  install -Dm755 scripts/waybar-autohide.sh   "$pkgdir/usr/share/hypr-settings/waybar-autohide.sh"
+  install -Dm755 scripts/mpvpaper-powersave.sh "$pkgdir/usr/share/hypr-settings/mpvpaper-powersave.sh"
+  install -Dm755 scripts/live-wallpaper.sh     "$pkgdir/usr/share/hypr-settings/live-wallpaper.sh"
+
+  install -d "$pkgdir/usr/bin"
+  printf '#!/bin/sh\nexec python3 /usr/share/hypr-settings/hypr-settings.py "$@"\n' \
+    > "$pkgdir/usr/bin/hypr-settings"
+  chmod 755 "$pkgdir/usr/bin/hypr-settings"
+
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/hypr-settings.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Hyprland Settings
+Comment=Settings panel for HyDE/Hyprland
+Exec=hypr-settings
+Icon=preferences-system
+Terminal=false
+Categories=Settings;DesktopSettings;GTK;
+EOF
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
