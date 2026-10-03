@@ -1,0 +1,3 @@
+# Python dependency (installed system-wide on Arch as `python-gobject`).
+# This file is for reference; GTK4/libadwaita are system libraries, not pip wheels.
+PyGObject>=3.46
