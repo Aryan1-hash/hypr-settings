@@ -46,6 +46,7 @@ LOG_DIR = os.path.join(SHARE, "logs")
 ACTIONS_LOG = os.path.join(LOG_DIR, "actions.log")
 BACKUP_DIR = os.path.join(LOG_DIR, "backups")
 STATERC = os.path.join(HOME, ".local", "state", "hyde", "staterc")
+HYDE_STATE_CONFIG = os.path.join(HOME, ".local", "state", "hyde", "config")
 THEMES_DIR = os.path.join(HOME, ".config", "hyde", "themes")
 WALLBASH_GTK = os.path.join(HOME, ".cache", "hyde", "wallbash", "gtk.css")
 LIVE_SH = _find_script("live-wallpaper.sh")
@@ -284,6 +285,40 @@ def waybar_layouts():
     return names
 
 
+def waybar_scale():
+    """Current Waybar icon/font size (px); HyDE's WAYBAR_SCALE, default 10."""
+    try:
+        with open(HYDE_STATE_CONFIG) as f:
+            for line in f:
+                m = re.match(r"\s*(?:export\s+)?WAYBAR_SCALE\s*=\s*(\d+)", line)
+                if m:
+                    return int(m.group(1))
+    except FileNotFoundError:
+        pass
+    return 10
+
+
+def set_waybar_scale(n):
+    os.makedirs(os.path.dirname(HYDE_STATE_CONFIG), exist_ok=True)
+    lines, found = [], False
+    try:
+        with open(HYDE_STATE_CONFIG) as f:
+            for line in f:
+                if re.match(r"\s*(?:export\s+)?WAYBAR_SCALE\s*=", line):
+                    lines.append(f"WAYBAR_SCALE={n}\n")
+                    found = True
+                else:
+                    lines.append(line)
+    except FileNotFoundError:
+        pass
+    if not found:
+        lines.append(f"WAYBAR_SCALE={n}\n")
+    with open(HYDE_STATE_CONFIG, "w") as f:
+        f.writelines(lines)
+    run_bg([WAYBAR_PY, "-u"])
+    log(f"waybar scale -> {n}")
+
+
 def list_themes():
     try:
         return sorted(d for d in os.listdir(THEMES_DIR)
@@ -474,6 +509,11 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.scale_hide = self._slider_row(g, "Hide threshold", 20, 300, 5, conf["HIDE_BELOW"], 0)
         self.scale_delay = self._slider_row(g, "Hide delay", 0.0, 3.0, 0.1, conf["HIDE_DELAY"], 1)
 
+        gsz = Adw.PreferencesGroup(title="Size")
+        page.add(gsz)
+        self.scale_size = self._slider_row(gsz, "Icon & font size", 8, 24, 1,
+                                           waybar_scale(), 0, on_change=self._on_scale)
+
         g2 = Adw.PreferencesGroup(title="Layout")
         page.add(g2)
         layouts = waybar_layouts()
@@ -572,7 +612,7 @@ class SettingsWindow(Adw.PreferencesWindow):
             self.toast("Auto-hide off")
             log("auto-hide DISABLED")
 
-    def _slider_row(self, group, title, lo, hi, step, value, digits):
+    def _slider_row(self, group, title, lo, hi, step, value, digits, on_change=None):
         row = Adw.ActionRow(title=title)
         scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, step)
         scale.set_value(value)
@@ -584,7 +624,8 @@ class SettingsWindow(Adw.PreferencesWindow):
         fmt = (lambda v: f"{v:.1f}") if digits else (lambda v: f"{int(round(v))}")
         val.set_text(fmt(value))
         val.add_css_class("dim-label")
-        scale.connect("value-changed", lambda s: (val.set_text(fmt(s.get_value())), self._on_tune()))
+        cb = on_change or self._on_tune
+        scale.connect("value-changed", lambda s: (val.set_text(fmt(s.get_value())), cb()))
         box = Gtk.Box(spacing=10, valign=Gtk.Align.CENTER)
         box.append(scale)
         box.append(val)
@@ -608,6 +649,20 @@ class SettingsWindow(Adw.PreferencesWindow):
         write_conf(conf)
         if conf["ENABLED"] and daemon_running():
             start_daemon()  # restart to pick up new values
+        return False
+
+    def _on_scale(self, *_):
+        # Applying restarts Waybar, so debounce while the slider is dragged.
+        src = getattr(self, "_scale_src", 0)
+        if src:
+            GLib.source_remove(src)
+        self._scale_src = GLib.timeout_add(600, self._commit_scale)
+
+    def _commit_scale(self):
+        self._scale_src = 0
+        n = int(self.scale_size.get_value())
+        set_waybar_scale(n)
+        self.toast(f"Bar icon size → {n}")
         return False
 
     def _on_layout(self, combo, _):
