@@ -326,20 +326,21 @@ _KITTY_BEGIN = "# >>> hypr-settings transparency >>>"
 _KITTY_END = "# <<< hypr-settings transparency <<<"
 
 
-def term_transparent():
+def term_opacity():
+    """kitty background opacity as a percentage (100 = opaque)."""
     try:
         with open(KITTY_CONF) as f:
             for line in f:
                 m = re.match(r"\s*background_opacity\s+([0-9.]+)", line)
                 if m:
-                    return float(m.group(1)) < 0.99
+                    return int(round(float(m.group(1)) * 100))
     except FileNotFoundError:
         pass
-    return False
+    return 100
 
 
-def set_term_transparent(on, level=0.82):
-    op = f"{level}" if on else "1.0"
+def set_term_opacity(pct):
+    op = f"{max(10, min(100, int(pct))) / 100:.2f}"
     try:
         with open(KITTY_CONF) as f:
             lines = f.readlines()
@@ -363,7 +364,7 @@ def set_term_transparent(on, level=0.82):
     with open(KITTY_CONF, "w") as f:
         f.writelines(out)
     run(["killall", "-SIGUSR1", "kitty"])  # live-reload any open kitty
-    log(f"terminal transparent={on}")
+    log(f"terminal opacity={op}")
 
 
 def _kvantum_conf():
@@ -383,61 +384,62 @@ def _kvantum_conf():
     return None
 
 
-def dolphin_transparent():
+def dolphin_opacity():
+    """Dolphin (Kvantum) window opacity as a percentage (100 = opaque)."""
     p = _kvantum_conf()
     if not p:
-        return False
+        return 100
     try:
         with open(p) as f:
             for line in f:
                 m = re.match(r"\s*reduce_window_opacity\s*=\s*(\d+)", line)
                 if m:
-                    return int(m.group(1)) > 0
+                    return 100 - int(m.group(1))
     except FileNotFoundError:
         pass
-    return False
+    return 100
 
 
-def set_dolphin_transparent(on, level=14):
+def set_dolphin_opacity(pct):
     p = _kvantum_conf()
     if not p:
         return
-    val = str(level) if on else "0"
+    reduce = str(max(0, min(90, 100 - int(pct))))
     with open(p) as f:
         lines = f.readlines()
     saw_reduce = False
     for i, ln in enumerate(lines):
         if re.match(r"\s*reduce_window_opacity\s*=", ln):
-            lines[i] = f"reduce_window_opacity={val}\n"
+            lines[i] = f"reduce_window_opacity={reduce}\n"
             saw_reduce = True
         elif re.match(r"\s*translucent_windows\s*=", ln):
             lines[i] = "translucent_windows=true\n"
     if not saw_reduce:
-        lines.append(f"reduce_window_opacity={val}\n")
+        lines.append(f"reduce_window_opacity={reduce}\n")
     with open(p, "w") as f:
         f.writelines(lines)
-    log(f"dolphin transparent={on}")
+    log(f"dolphin opacity={pct} (reduce={reduce})")
 
 
 def read_transp_prefs():
-    prefs = {"TERM": term_transparent(), "DOLPHIN": dolphin_transparent()}
+    prefs = {"TERM": term_opacity(), "DOLPHIN": dolphin_opacity()}
     try:
         with open(TRANSP_CONF) as f:
             for line in f:
-                m = re.match(r"\s*(TERM|DOLPHIN)\s*=\s*([01])", line)
+                m = re.match(r"\s*(TERM|DOLPHIN)\s*=\s*(\d+)", line)
                 if m:
-                    prefs[m.group(1)] = m.group(2) == "1"
+                    prefs[m.group(1)] = int(m.group(2))
     except FileNotFoundError:
         pass
     return prefs
 
 
-def save_transp_pref(key, on):
+def save_transp_pref(key, pct):
     prefs = read_transp_prefs()
-    prefs[key] = on
+    prefs[key] = int(pct)
     os.makedirs(os.path.dirname(TRANSP_CONF), exist_ok=True)
     with open(TRANSP_CONF, "w") as f:
-        f.write(f"TERM={1 if prefs['TERM'] else 0}\nDOLPHIN={1 if prefs['DOLPHIN'] else 0}\n")
+        f.write(f"TERM={prefs['TERM']}\nDOLPHIN={prefs['DOLPHIN']}\n")
 
 
 def list_themes():
@@ -609,9 +611,10 @@ class SettingsWindow(Adw.PreferencesWindow):
             self.combo_theme.set_selected(self._themes.index(th))
             self._guard("theme", False)
         # A theme switch regenerates the Kvantum config — re-apply Dolphin
-        # transparency if the user had it on.
-        if read_transp_prefs().get("DOLPHIN") and not dolphin_transparent():
-            set_dolphin_transparent(True)
+        # transparency if the user had set it.
+        dpref = read_transp_prefs().get("DOLPHIN", 100)
+        if dpref < 100 and dolphin_opacity() != dpref:
+            set_dolphin_opacity(dpref)
         return False
 
     def toast(self, text):
@@ -829,18 +832,32 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.toast(f"Applying theme “{name}” …")
         log(f"theme switch -> {name}")
 
-    def _on_term_transp(self, row, _):
-        on = row.get_active()
-        set_term_transparent(on)
-        save_transp_pref("TERM", on)
-        self.toast("Terminal transparency " + ("on" if on else "off"))
+    def _on_term_opacity(self, *_):
+        src = getattr(self, "_term_src", 0)
+        if src:
+            GLib.source_remove(src)
+        self._term_src = GLib.timeout_add(400, self._commit_term_opacity)
 
-    def _on_dolphin_transp(self, row, _):
-        on = row.get_active()
-        set_dolphin_transparent(on)
-        save_transp_pref("DOLPHIN", on)
-        self.toast("File manager transparency " + ("on" if on else "off")
-                   + " — reopen Dolphin to see it")
+    def _commit_term_opacity(self):
+        self._term_src = 0
+        v = int(self.scale_term.get_value())
+        set_term_opacity(v)
+        save_transp_pref("TERM", v)
+        return False
+
+    def _on_dolphin_opacity(self, *_):
+        src = getattr(self, "_dol_src", 0)
+        if src:
+            GLib.source_remove(src)
+        self._dol_src = GLib.timeout_add(400, self._commit_dolphin_opacity)
+
+    def _commit_dolphin_opacity(self):
+        self._dol_src = 0
+        v = int(self.scale_dolphin.get_value())
+        set_dolphin_opacity(v)
+        save_transp_pref("DOLPHIN", v)
+        self.toast("File manager opacity set — reopen Dolphin to see it")
+        return False
 
     # ===== Appearance (theme + wallpaper) =====
     def _appearance_page(self):
@@ -887,20 +904,15 @@ class SettingsWindow(Adw.PreferencesWindow):
         self._row_button(gm, "Choose video…", "", "Browse", self._choose_video, sensitive=installed)
         self._row_button(gm, "Choose image…", "", "Browse", self._choose_image)
 
-        # --- Transparency toggles (app-level, no RAM cost) ---
+        # --- Transparency sliders (app-level, no RAM cost; 100% = opaque) ---
         prefs = read_transp_prefs()
-        gtr = Adw.PreferencesGroup(title="Transparency")
+        gtr = Adw.PreferencesGroup(title="Transparency",
+                                   description="Opacity %. 100 = solid; lower = more see-through.")
         page.add(gtr)
-        self.sw_term = Adw.SwitchRow(title="Transparent terminal",
-                                     subtitle="kitty — applies instantly")
-        self.sw_term.set_active(prefs["TERM"])
-        self.sw_term.connect("notify::active", self._on_term_transp)
-        gtr.add(self.sw_term)
-        self.sw_dolphin = Adw.SwitchRow(title="Transparent file manager",
-                                        subtitle="Dolphin — applies to newly opened windows")
-        self.sw_dolphin.set_active(prefs["DOLPHIN"])
-        self.sw_dolphin.connect("notify::active", self._on_dolphin_transp)
-        gtr.add(self.sw_dolphin)
+        self.scale_term = self._slider_row(gtr, "Terminal (kitty)", 40, 100, 5,
+                                           prefs["TERM"], 0, on_change=self._on_term_opacity)
+        self.scale_dolphin = self._slider_row(gtr, "File manager (Dolphin)", 50, 100, 5,
+                                              prefs["DOLPHIN"], 0, on_change=self._on_dolphin_opacity)
 
         # --- Theme wallpapers gallery (lazy thumbnails per theme) ---
         gt = Adw.PreferencesGroup(title="Theme wallpapers")
