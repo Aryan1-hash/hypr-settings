@@ -584,6 +584,19 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.add(self._about_page())
         log("app opened")
         self._watch_state()
+        # Don't let the first row grab focus (the theme highlights focused rows,
+        # which looks like it's "selected"). Clear focus on open and page change.
+        self.connect("notify::visible-page", lambda *_: self._clear_focus())
+        self.connect("map", lambda *_: self._clear_focus())
+
+    def _clear_focus(self):
+        def clear():
+            try:
+                self.set_focus(None)
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+        GLib.timeout_add(120, clear)
 
     def _watch_state(self):
         # Keep the Layout / Theme selectors in sync when they're changed
