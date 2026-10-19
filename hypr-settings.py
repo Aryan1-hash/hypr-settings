@@ -524,6 +524,20 @@ scale trough {{
 scale highlight, scale slider {{
   background-color: @accent_bg_color;
 }}
+/* Combo/menu popovers: tighter frame so the list hugs its items
+   (theme default is padding:6px + 12px corner, which leaves empty space
+   below the last row). */
+popover.menu > contents {{
+  padding: 3px;
+  border-radius: 9px;
+}}
+popover.menu scrolledwindow,
+popover.menu listview {{
+  min-height: 0;
+}}
+popover.menu listview > row {{
+  min-height: 0;
+}}
 '''
 
 
@@ -652,7 +666,7 @@ class SettingsWindow(Adw.PreferencesWindow):
 
         gsz = Adw.PreferencesGroup(title="Size")
         page.add(gsz)
-        self.scale_size = self._slider_row(gsz, "Icon & font size", 8, 24, 1,
+        self.scale_size = self._slider_row(gsz, "Icon and font size", 8, 24, 1,
                                            waybar_scale(), 0, on_change=self._on_scale)
 
         g2 = Adw.PreferencesGroup(title="Layout")
