@@ -47,6 +47,8 @@ ACTIONS_LOG = os.path.join(LOG_DIR, "actions.log")
 BACKUP_DIR = os.path.join(LOG_DIR, "backups")
 STATERC = os.path.join(HOME, ".local", "state", "hyde", "staterc")
 HYDE_STATE_CONFIG = os.path.join(HOME, ".local", "state", "hyde", "config")
+KITTY_CONF = os.path.join(HOME, ".config", "kitty", "kitty.conf")
+TRANSP_CONF = os.path.join(HOME, ".config", "hypr-settings", "transparency.conf")
 THEMES_DIR = os.path.join(HOME, ".config", "hyde", "themes")
 WALLBASH_GTK = os.path.join(HOME, ".cache", "hyde", "wallbash", "gtk.css")
 LIVE_SH = _find_script("live-wallpaper.sh")
@@ -319,6 +321,125 @@ def set_waybar_scale(n):
     log(f"waybar scale -> {n}")
 
 
+# ---------- app transparency (kitty + Dolphin, app-level — no RAM cost) ----------
+_KITTY_BEGIN = "# >>> hypr-settings transparency >>>"
+_KITTY_END = "# <<< hypr-settings transparency <<<"
+
+
+def term_transparent():
+    try:
+        with open(KITTY_CONF) as f:
+            for line in f:
+                m = re.match(r"\s*background_opacity\s+([0-9.]+)", line)
+                if m:
+                    return float(m.group(1)) < 0.99
+    except FileNotFoundError:
+        pass
+    return False
+
+
+def set_term_transparent(on, level=0.82):
+    op = f"{level}" if on else "1.0"
+    try:
+        with open(KITTY_CONF) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = []
+    out, skip = [], False
+    for ln in lines:
+        if ln.strip() == _KITTY_BEGIN:
+            skip = True
+            continue
+        if ln.strip() == _KITTY_END:
+            skip = False
+            continue
+        if not skip:
+            out.append(ln)
+    while out and out[-1].strip() == "":
+        out.pop()
+    out += ["\n", _KITTY_BEGIN + "\n", "dynamic_background_opacity yes\n",
+            f"background_opacity {op}\n", _KITTY_END + "\n"]
+    os.makedirs(os.path.dirname(KITTY_CONF), exist_ok=True)
+    with open(KITTY_CONF, "w") as f:
+        f.writelines(out)
+    run(["killall", "-SIGUSR1", "kitty"])  # live-reload any open kitty
+    log(f"terminal transparent={on}")
+
+
+def _kvantum_conf():
+    base = os.path.join(HOME, ".config", "Kvantum")
+    theme = None
+    try:
+        with open(os.path.join(base, "kvantum.kvconfig")) as f:
+            for line in f:
+                m = re.match(r"\s*theme\s*=\s*(\S+)", line)
+                if m:
+                    theme = m.group(1)
+    except FileNotFoundError:
+        return None
+    if theme:
+        p = os.path.join(base, theme, theme + ".kvconfig")
+        return p if os.path.exists(p) else None
+    return None
+
+
+def dolphin_transparent():
+    p = _kvantum_conf()
+    if not p:
+        return False
+    try:
+        with open(p) as f:
+            for line in f:
+                m = re.match(r"\s*reduce_window_opacity\s*=\s*(\d+)", line)
+                if m:
+                    return int(m.group(1)) > 0
+    except FileNotFoundError:
+        pass
+    return False
+
+
+def set_dolphin_transparent(on, level=14):
+    p = _kvantum_conf()
+    if not p:
+        return
+    val = str(level) if on else "0"
+    with open(p) as f:
+        lines = f.readlines()
+    saw_reduce = False
+    for i, ln in enumerate(lines):
+        if re.match(r"\s*reduce_window_opacity\s*=", ln):
+            lines[i] = f"reduce_window_opacity={val}\n"
+            saw_reduce = True
+        elif re.match(r"\s*translucent_windows\s*=", ln):
+            lines[i] = "translucent_windows=true\n"
+    if not saw_reduce:
+        lines.append(f"reduce_window_opacity={val}\n")
+    with open(p, "w") as f:
+        f.writelines(lines)
+    log(f"dolphin transparent={on}")
+
+
+def read_transp_prefs():
+    prefs = {"TERM": term_transparent(), "DOLPHIN": dolphin_transparent()}
+    try:
+        with open(TRANSP_CONF) as f:
+            for line in f:
+                m = re.match(r"\s*(TERM|DOLPHIN)\s*=\s*([01])", line)
+                if m:
+                    prefs[m.group(1)] = m.group(2) == "1"
+    except FileNotFoundError:
+        pass
+    return prefs
+
+
+def save_transp_pref(key, on):
+    prefs = read_transp_prefs()
+    prefs[key] = on
+    os.makedirs(os.path.dirname(TRANSP_CONF), exist_ok=True)
+    with open(TRANSP_CONF, "w") as f:
+        f.write(f"TERM={1 if prefs['TERM'] else 0}\nDOLPHIN={1 if prefs['DOLPHIN'] else 0}\n")
+
+
 def list_themes():
     try:
         return sorted(d for d in os.listdir(THEMES_DIR)
@@ -487,6 +608,10 @@ class SettingsWindow(Adw.PreferencesWindow):
             self._guard("theme", True)
             self.combo_theme.set_selected(self._themes.index(th))
             self._guard("theme", False)
+        # A theme switch regenerates the Kvantum config — re-apply Dolphin
+        # transparency if the user had it on.
+        if read_transp_prefs().get("DOLPHIN") and not dolphin_transparent():
+            set_dolphin_transparent(True)
         return False
 
     def toast(self, text):
@@ -704,6 +829,19 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.toast(f"Applying theme “{name}” …")
         log(f"theme switch -> {name}")
 
+    def _on_term_transp(self, row, _):
+        on = row.get_active()
+        set_term_transparent(on)
+        save_transp_pref("TERM", on)
+        self.toast("Terminal transparency " + ("on" if on else "off"))
+
+    def _on_dolphin_transp(self, row, _):
+        on = row.get_active()
+        set_dolphin_transparent(on)
+        save_transp_pref("DOLPHIN", on)
+        self.toast("File manager transparency " + ("on" if on else "off")
+                   + " — reopen Dolphin to see it")
+
     # ===== Appearance (theme + wallpaper) =====
     def _appearance_page(self):
         page = Adw.PreferencesPage(title="Appearance", icon_name="applications-graphics-symbolic")
@@ -748,6 +886,21 @@ class SettingsWindow(Adw.PreferencesWindow):
             gm.add(self.combo_video)
         self._row_button(gm, "Choose video…", "", "Browse", self._choose_video, sensitive=installed)
         self._row_button(gm, "Choose image…", "", "Browse", self._choose_image)
+
+        # --- Transparency toggles (app-level, no RAM cost) ---
+        prefs = read_transp_prefs()
+        gtr = Adw.PreferencesGroup(title="Transparency")
+        page.add(gtr)
+        self.sw_term = Adw.SwitchRow(title="Transparent terminal",
+                                     subtitle="kitty — applies instantly")
+        self.sw_term.set_active(prefs["TERM"])
+        self.sw_term.connect("notify::active", self._on_term_transp)
+        gtr.add(self.sw_term)
+        self.sw_dolphin = Adw.SwitchRow(title="Transparent file manager",
+                                        subtitle="Dolphin — applies to newly opened windows")
+        self.sw_dolphin.set_active(prefs["DOLPHIN"])
+        self.sw_dolphin.connect("notify::active", self._on_dolphin_transp)
+        gtr.add(self.sw_dolphin)
 
         # --- Theme wallpapers gallery (lazy thumbnails per theme) ---
         gt = Adw.PreferencesGroup(title="Theme wallpapers")
