@@ -9,13 +9,13 @@ you're using.
 
 ## What it does
 
-- **Waybar** – make the bar hide and slide back in when your mouse hits the top (like the Windows taskbar), tune how sensitive that is, and switch bar layouts with a little preview of each.
+- **Waybar** – make the bar hide and slide back in when your mouse hits the top (like the Windows taskbar), tune how sensitive that is, resize its icons, and switch bar layouts with a little preview of each. Auto-hide is remembered across reboots – if you left it on, it comes back on at login.
 - **Appearance** – change your theme, pick a wallpaper, or set a video as a live wallpaper.
 - **Wi-Fi & Bluetooth** – toggle them, peek at / copy your Wi-Fi password, or open the full managers.
 - **Date & Time** – clock, calendar, auto time, timezone.
 - **Battery** – charge, a live power-usage graph, battery health, power modes (saver / balanced / performance), and what's hogging your CPU.
 - **Privacy** – flip location on or off.
-- **Display** – mirror or extend to a second screen.
+- **Display** – mirror or extend to a second screen, and set your screen timeouts (dim, lock, screen-off, suspend) in minutes – slide to 0 for Never.
 - **Troubleshoot & Logs** – quick fixes if the bar acts up, plus a log of everything the app changed.
 
 ## The live wallpaper won't kill your battery

@@ -55,6 +55,8 @@ LIVE_SH = _find_script("live-wallpaper.sh")
 LIVE_WALL_DIR = os.path.join(HOME, "Videos", "live-wallpapers")
 HYDE_SHELL = os.path.join(HOME, ".local", "bin", "hyde-shell")
 WAYBAR_PY = os.path.join(HOME, ".local", "lib", "hyde", "waybar.py")
+HYPRLAND_LUA = os.path.join(HOME, ".config", "hypr", "hyprland.lua")
+HYPRIDLE_CONF = os.path.join(HOME, ".config", "hypr", "hypridle.conf")
 
 
 # ---------- logging ----------
@@ -267,12 +269,129 @@ def restart_waybar():
     log("waybar restarted via waybar.py -u")
 
 
+# ---------- login persistence (remember auto-hide across logins) ----------
+# A guarded block in the user's hyprland.lua starts the daemon at login. The
+# daemon reads autohide.conf and exits at once when auto-hide is off, so the
+# bar comes back in whatever state it was left in — and it costs nothing when
+# disabled.
+_HOOK_BEGIN = "-- >>> hypr-settings waybar auto-hide >>>"
+_HOOK_END = "-- <<< hypr-settings waybar auto-hide <<<"
+
+
+def login_hook_installed():
+    try:
+        with open(HYPRLAND_LUA) as f:
+            return _HOOK_BEGIN in f.read()
+    except FileNotFoundError:
+        return False
+
+
+def ensure_login_hook():
+    """Install the at-login autostart into hyprland.lua (idempotent)."""
+    if login_hook_installed():
+        return
+    block = (
+        f"\n{_HOOK_BEGIN}\n"
+        "-- Restore the Waybar auto-hide state from your last session at login.\n"
+        "-- The daemon reads ~/.config/hypr-settings/autohide.conf and exits\n"
+        "-- immediately if auto-hide is off, so this is free when disabled.\n"
+        'hl.on("hyprland.start", function()\n'
+        f'  hl.exec_cmd("{DAEMON}")\n'
+        "end)\n"
+        f"{_HOOK_END}\n"
+    )
+    try:
+        backup_file(HYPRLAND_LUA)
+        with open(HYPRLAND_LUA, "a") as f:
+            f.write(block)
+        log("installed login hook in hyprland.lua")
+    except Exception as e:  # noqa: BLE001
+        log(f"login hook install FAILED: {e}")
+
+
 def apply_bar_animation():
     run(["hyprctl", "eval",
          'hl.animation({ leaf="layers", enabled=true, speed=4, bezier="default", style="slide" })'])
     run(["hyprctl", "eval",
          'hl.layer_rule({ name="autohide_anim", match={namespace="waybar"}, animation="slide top" })'])
     log("reapplied bar slide animation")
+
+
+# ---------- screen idle timeouts (hypridle) ----------
+# Each HyDE idle "listener" is recognised by its on-timeout command. We expose
+# the timeout (in minutes) and let the user disable one entirely ("Never").
+_NEVER_SECS = 86400  # 24h — effectively never
+IDLE_LISTENERS = [
+    # key,       label,                    signature in the on-timeout command
+    ("dim",     "Dim the screen",         r"brightnessctl"),
+    ("lock",    "Lock the screen",        r"lock-session"),
+    ("dpms",    "Turn the screen off",    r"dpms\s+off"),
+    ("suspend", "Suspend",                r"systemctl\s+suspend"),
+]
+
+
+def _idle_blocks(text):
+    """Yield (key, start, end) for each recognised listener block."""
+    out = []
+    for m in re.finditer(r"listener\s*\{.*?\}", text, re.S):
+        ot = re.search(r"on-timeout\s*=\s*(.+)", m.group(0))
+        cmd = ot.group(1) if ot else ""
+        for key, _label, sig in IDLE_LISTENERS:
+            if re.search(sig, cmd):
+                out.append((key, m.start(), m.end()))
+                break
+    return out
+
+
+def read_idle_timeouts():
+    """Return {key: seconds} for each recognised listener (None if absent)."""
+    res = {k: None for k, _, _ in IDLE_LISTENERS}
+    try:
+        with open(HYPRIDLE_CONF) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return res
+    for key, s, e in _idle_blocks(text):
+        tm = re.search(r"timeout\s*=\s*(\d+)", text[s:e])
+        if tm:
+            res[key] = int(tm.group(1))
+    return res
+
+
+def set_idle_timeout(key, minutes):
+    """Write a listener's timeout (minutes; <=0 means Never) and reload hypridle."""
+    try:
+        with open(HYPRIDLE_CONF) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return False
+    secs = int(round(minutes * 60)) if minutes > 0 else _NEVER_SECS
+    for k, s, e in _idle_blocks(text):
+        if k == key:
+            newblk = re.sub(r"(timeout\s*=\s*)\d+", r"\g<1>" + str(secs),
+                            text[s:e], count=1)
+            if newblk != text[s:e]:
+                backup_file(HYPRIDLE_CONF)
+                text = text[:s] + newblk + text[e:]
+                with open(HYPRIDLE_CONF, "w") as f:
+                    f.write(text)
+                log(f"hypridle {key} timeout -> {secs}s")
+                reload_hypridle()
+            return True
+    return False
+
+
+def reload_hypridle():
+    """Restart hypridle so the edited config takes effect."""
+    unit = run(["bash", "-lc",
+                "systemctl --user list-units --type=service --plain --no-legend "
+                "2>/dev/null | awk '/idle/{print $1; exit}'"]).stdout.strip()
+    if unit:
+        run_log(["systemctl", "--user", "restart", unit], "restart hypridle")
+    else:
+        run(["pkill", "-x", "hypridle"])
+        time.sleep(0.3)
+        run_bg(["hypridle"])
 
 
 def waybar_layouts():
@@ -597,6 +716,10 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.add(self._logs_page())
         self.add(self._about_page())
         log("app opened")
+        # If auto-hide is already on, make sure the at-login autostart exists
+        # so it survives a logout/reboot (older installs won't have it).
+        if read_conf()["ENABLED"]:
+            ensure_login_hook()
         self._watch_state()
         # Don't let the first row grab focus (the theme highlights focused rows,
         # which looks like it's "selected"). Clear focus on open and page change.
@@ -758,25 +881,30 @@ class SettingsWindow(Adw.PreferencesWindow):
         conf["ENABLED"] = 1 if on else 0
         write_conf(conf)
         if on:
+            ensure_login_hook()  # so it comes back auto-hidden after you log in
             apply_bar_animation()
             start_daemon()
-            self.toast("Auto-hide on — move the pointer to the top to reveal")
+            self.toast("Auto-hide on — stays on after you log in")
             log("auto-hide ENABLED")
         else:
             stop_daemon()
             self.toast("Auto-hide off")
             log("auto-hide DISABLED")
 
-    def _slider_row(self, group, title, lo, hi, step, value, digits, on_change=None):
+    def _slider_row(self, group, title, lo, hi, step, value, digits,
+                    on_change=None, fmt=None, subtitle=None):
         row = Adw.ActionRow(title=title)
+        if subtitle:
+            row.set_subtitle(subtitle)
         scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, step)
         scale.set_value(value)
         scale.set_draw_value(False)
         scale.set_hexpand(True)
         scale.set_size_request(190, -1)
         scale.set_valign(Gtk.Align.CENTER)
-        val = Gtk.Label(xalign=1, width_chars=4)
-        fmt = (lambda v: f"{v:.1f}") if digits else (lambda v: f"{int(round(v))}")
+        val = Gtk.Label(xalign=1, width_chars=6)
+        if fmt is None:
+            fmt = (lambda v: f"{v:.1f}") if digits else (lambda v: f"{int(round(v))}")
         val.set_text(fmt(value))
         val.add_css_class("dim-label")
         cb = on_change or self._on_tune
@@ -1413,7 +1541,43 @@ class SettingsWindow(Adw.PreferencesWindow):
         self._display_group = Adw.PreferencesGroup(title="Mirror / Extend")
         page.add(self._display_group)
         self._rebuild_display_rows()
+
+        # --- Screen timeout (hypridle) ---
+        idle = read_idle_timeouts()
+        if any(v is not None for v in idle.values()):
+            gi = Adw.PreferencesGroup(
+                title="Screen timeout",
+                description="Minutes of inactivity before each step. Slide to 0 for Never.")
+            page.add(gi)
+            fmt = lambda v: "Never" if v <= 0 else f"{int(round(v))} min"  # noqa: E731
+            self._idle_scales = {}
+            self._idle_src = {}
+            for key, label, _sig in IDLE_LISTENERS:
+                secs = idle.get(key)
+                if secs is None:
+                    continue
+                mins = 0 if secs >= _NEVER_SECS else max(0, round(secs / 60))
+                sc = self._slider_row(
+                    gi, label, 0, 60, 1, mins, 0,
+                    on_change=(lambda k: lambda: self._on_idle(k))(key), fmt=fmt)
+                self._idle_scales[key] = sc
         return page
+
+    def _on_idle(self, key):
+        # Debounce per listener, then write + reload hypridle once.
+        src = self._idle_src.get(key, 0)
+        if src:
+            GLib.source_remove(src)
+        self._idle_src[key] = GLib.timeout_add(
+            450, lambda: self._commit_idle(key))
+
+    def _commit_idle(self, key):
+        self._idle_src[key] = 0
+        mins = self._idle_scales[key].get_value()
+        set_idle_timeout(key, mins)
+        self.toast(("Screen won't turn off" if key == "dpms" and mins <= 0
+                    else "Idle timeout updated"))
+        return False
 
     def _rebuild_display_rows(self):
         grp = self._display_group
