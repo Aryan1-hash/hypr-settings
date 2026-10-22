@@ -12,6 +12,7 @@ you're using.
 - **Waybar** – make the bar hide and slide back in when your mouse hits the top (like the Windows taskbar), tune how sensitive that is, resize its icons, and switch bar layouts with a little preview of each. Auto-hide is remembered across reboots – if you left it on, it comes back on at login.
 - **Appearance** – change your theme, pick a wallpaper, or set a video as a live wallpaper.
 - **Wi-Fi & Bluetooth** – toggle them, peek at / copy your Wi-Fi password, or open the full managers.
+- **Audio** – pick your output, or play on several at once (e.g. laptop speakers + a Bluetooth speaker), with a sync-delay slider so Bluetooth doesn't lag behind. The output list updates live as devices connect.
 - **Date & Time** – clock, calendar, auto time, timezone.
 - **Battery** – charge, a live power-usage graph, battery health, power modes (saver / balanced / performance), and what's hogging your CPU.
 - **Privacy** – flip location on or off.

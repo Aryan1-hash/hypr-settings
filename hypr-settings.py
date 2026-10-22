@@ -57,6 +57,8 @@ HYDE_SHELL = os.path.join(HOME, ".local", "bin", "hyde-shell")
 WAYBAR_PY = os.path.join(HOME, ".local", "lib", "hyde", "waybar.py")
 HYPRLAND_LUA = os.path.join(HOME, ".config", "hypr", "hyprland.lua")
 HYPRIDLE_CONF = os.path.join(HOME, ".config", "hypr", "hypridle.conf")
+COMBINE_SINK = "AllSpeakers"
+AUDIO_CONF = os.path.join(HOME, ".config", "hypr-settings", "audio.conf")
 
 
 # ---------- logging ----------
@@ -394,6 +396,134 @@ def reload_hypridle():
         run_bg(["hypridle"])
 
 
+# ---------- audio (PipeWire: play on several outputs at once) ----------
+# "AllSpeakers" is a null sink whose monitor is fanned out to one loopback per
+# chosen output. The wired outputs get an extra delay (the sync setting) so they
+# line up with Bluetooth's codec latency. Everything is loaded ON DEMAND with
+# pactl and torn down cleanly — no persistent config and no PipeWire restart, so
+# it never disturbs Bluetooth.
+def _sink_descriptions():
+    d, cur = {}, None
+    for line in run(["pactl", "list", "sinks"]).stdout.splitlines():
+        s = line.strip()
+        m = re.match(r"Name:\s*(.+)", s)
+        if m:
+            cur = m.group(1)
+            continue
+        m = re.match(r"Description:\s*(.+)", s)
+        if m and cur:
+            d[cur] = m.group(1)
+    return d
+
+
+def audio_sinks():
+    """Real hardware output sinks only — ALSA (speakers/HDMI/USB) and Bluetooth.
+    Virtual sinks (the combined sink, echo-cancel, null or loopback sinks) are
+    skipped so they can never be combined into themselves."""
+    descs = _sink_descriptions()
+    out = []
+    for line in run(["pactl", "list", "short", "sinks"]).stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        name = parts[1]
+        if not (name.startswith("alsa_output.") or name.startswith("bluez_output.")):
+            continue   # skip virtual sinks (AllSpeakers, echocancel_sink, …)
+        out.append({"name": name, "bt": name.startswith("bluez_output"),
+                    "desc": descs.get(name, name)})
+    return out
+
+
+def combine_sink_present():
+    return any(p.split("\t")[1:2] == [COMBINE_SINK]
+               for p in run(["pactl", "list", "short", "sinks"]).stdout.splitlines())
+
+
+def default_sink():
+    return run(["pactl", "get-default-sink"]).stdout.strip()
+
+
+def set_default_sink(name):
+    run_log(["pactl", "set-default-sink", name], f"default sink -> {name}")
+    # Move anything already playing onto the new output, too.
+    for line in run(["pactl", "list", "short", "sink-inputs"]).stdout.splitlines():
+        sid = line.split("\t")[0]
+        if sid.isdigit():
+            run(["pactl", "move-sink-input", sid, name])
+
+
+# Baseline buffering for the Bluetooth path; wired outputs get this PLUS the
+# user's sync delay so they line up with Bluetooth's codec latency.
+_SYNC_BASE_MS = 100
+
+
+def audio_sync_delay():
+    """ms the wired outputs are delayed to line up with Bluetooth (default 150)."""
+    try:
+        with open(AUDIO_CONF) as f:
+            for line in f:
+                m = re.match(r"\s*SYNC_DELAY\s*=\s*(\d+)", line)
+                if m:
+                    return int(m.group(1))
+    except FileNotFoundError:
+        pass
+    return 150
+
+
+def save_sync_delay(ms):
+    os.makedirs(CONF_DIR, exist_ok=True)
+    with open(AUDIO_CONF, "w") as f:
+        f.write(f"SYNC_DELAY={int(ms)}\n")
+    log(f"audio sync delay -> {int(ms)}ms")
+
+
+def combine_module_ids():
+    """ids of our null sink + loopbacks (newest first, so loopbacks unload first)."""
+    ids = []
+    for line in run(["pactl", "list", "short", "modules"]).stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and ("module-null-sink" in parts[1]
+                                or "module-loopback" in parts[1]) \
+                and COMBINE_SINK in line:
+            ids.append(parts[0])
+    return sorted(ids, key=lambda x: int(x), reverse=True)
+
+
+def start_combine(slaves):
+    """Play on several outputs at once, kept in sync. A null sink fans out to one
+    delay-matched loopback per output: Bluetooth at the baseline buffer, wired
+    outputs delayed by the sync setting so they line up. No PipeWire restart."""
+    stop_combine()
+    sinks = {s["name"]: s for s in audio_sinks()}
+    slaves = [s for s in slaves if s in sinks]
+    if len(slaves) < 2:
+        return False
+    run_log(["pactl", "load-module", "module-null-sink",
+             f"sink_name={COMBINE_SINK}",
+             "sink_properties=device.description=All Speakers (PC + BT)"],
+            "combine: null sink")
+    time.sleep(0.3)
+    delay = audio_sync_delay()
+    for name in slaves:
+        lat = _SYNC_BASE_MS if sinks[name]["bt"] else _SYNC_BASE_MS + delay
+        run(["pactl", "load-module", "module-loopback",
+             f"source={COMBINE_SINK}.monitor", f"sink={name}",
+             f"latency_msec={lat}", "source_dont_move=true", "sink_dont_move=true"])
+    time.sleep(0.3)
+    if combine_sink_present():
+        set_default_sink(COMBINE_SINK)
+        return True
+    stop_combine()
+    return False
+
+
+def stop_combine():
+    """Unload the combined sink and its loopbacks if loaded.[ar]"""
+    for mid in combine_module_ids():
+        run(["pactl", "unload-module", mid])
+    time.sleep(0.2)
+
+
 def waybar_layouts():
     cp = run([WAYBAR_PY, "--json"])
     names = []
@@ -407,7 +537,7 @@ def waybar_layouts():
 
 
 def waybar_scale():
-    """Current Waybar icon/font size (px); HyDE's WAYBAR_SCALE, default 10."""
+    """Current Waybar icon/font size (px); HyDE's WAYBAR_SCALE, default 10[hmm]."""
     try:
         with open(HYDE_STATE_CONFIG) as f:
             for line in f:
@@ -708,6 +838,7 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.add(self._waybar_page())
         self.add(self._appearance_page())
         self.add(self._connectivity_page())
+        self.add(self._audio_page())
         self.add(self._datetime_page())
         self.add(self._battery_page())
         self.add(self._privacy_page())
@@ -1319,6 +1450,160 @@ class SettingsWindow(Adw.PreferencesWindow):
         run_log(["bluetoothctl", "power", "on" if row.get_active() else "off"], "bt toggle")
         GLib.timeout_add(800, lambda: (row.set_subtitle(self._bt_status()), False)[1])
         self.toast("Bluetooth " + ("on" if row.get_active() else "off"))
+
+    # ===== Audio =====
+    def _audio_page(self):
+        page = Adw.PreferencesPage(title="Audio", icon_name="audio-speakers-symbolic")
+
+        self._audio_out_group = Adw.PreferencesGroup(
+            title="Playback output",
+            description="Where sound comes out — pick one, or play on everything at once.")
+        page.add(self._audio_out_group)
+        self.combo_sink = Adw.ComboRow(title="Play sound on")
+        self.combo_sink.connect("notify::selected", self._on_sink)
+        self._scroll_combo(self.combo_sink)
+        self._audio_out_group.add(self.combo_sink)
+
+        self._audio_members_group = Adw.PreferencesGroup(
+            title="“All speakers” includes",
+            description="Connected outputs — tick the ones to combine, then pick "
+                        "“All speakers at once” above. Updates live as "
+                        "devices connect or disconnect.")
+        page.add(self._audio_members_group)
+
+        gsync = Adw.PreferencesGroup(
+            title="Sync",
+            description="If Bluetooth lags behind the speakers, nudge this up until "
+                        "they line up.")
+        page.add(gsync)
+        self.scale_sync = self._slider_row(
+            gsync, "Bluetooth sync delay", 0, 400, 10, audio_sync_delay(), 0,
+            on_change=self._on_sync_delay, fmt=lambda v: f"{int(round(v))} ms")
+
+        g3 = Adw.PreferencesGroup(title="Per-app")
+        page.add(g3)
+        self._row_button(g3, "Volume mixer", "Send individual apps to specific outputs",
+                         "Open", lambda: run_bg(["pavucontrol"]),
+                         sensitive=have("pavucontrol"))
+
+        self._member_state = {}       # sink name -> included in "All speakers"
+        self._member_rows = []
+        self._audio_sink_names = []
+        self._applied_members = []
+        self._rebuild_audio_lists()
+        self._audio_poll_id = GLib.timeout_add(2500, self._audio_poll)
+        return page
+
+    def _rebuild_audio_lists(self):
+        """Repopulate the output picker + membership switches from live sinks."""
+        self._audio_sinks = audio_sinks()
+        self._audio_sink_names = [s["name"] for s in self._audio_sinks]
+
+        for r in self._member_rows:
+            self._audio_members_group.remove(r)
+        self._member_rows = []
+        for s in self._audio_sinks:
+            state = self._member_state.setdefault(s["name"], True)
+            sw = Adw.SwitchRow(title=s["desc"],
+                               subtitle="Bluetooth" if s["bt"] else "Built-in / analog")
+            sw.set_active(state)          # set before connecting so it doesn't fire
+            sw.connect("notify::active",
+                       (lambda n: lambda r, _p: self._on_member_toggle(n, r))(s["name"]))
+            self._audio_members_group.add(sw)
+            self._member_rows.append(sw)
+        if not self._audio_sinks:
+            row = Adw.ActionRow(title="No audio outputs found")
+            self._audio_members_group.add(row)
+            self._member_rows.append(row)
+
+        labels = [s["desc"] for s in self._audio_sinks] + ["All speakers at once"]
+        self._guard("sink", True)
+        self.combo_sink.set_model(Gtk.StringList.new(labels))
+        self._refresh_sink_combo(guarded=True)
+        self._guard("sink", False)
+
+    def _selected_members(self):
+        return [n for n in self._audio_sink_names if self._member_state.get(n, True)]
+
+    def _refresh_sink_combo(self, guarded=False):
+        cur = default_sink()
+        if cur == COMBINE_SINK:
+            i = len(self._audio_sinks)
+        else:
+            i = next((j for j, s in enumerate(self._audio_sinks)
+                      if s["name"] == cur), 0)
+        if not guarded:
+            self._guard("sink", True)
+        self.combo_sink.set_selected(i)
+        if not guarded:
+            self._guard("sink", False)
+
+    def _on_sink(self, row, _):
+        if self._guarded("sink"):
+            return
+        idx = row.get_selected()
+        if idx == len(self._audio_sinks):              # "All speakers at once"
+            members = self._selected_members()
+            if len(members) < 2:
+                self.toast("Tick at least two outputs below first")
+                self._refresh_sink_combo()
+                return
+            if start_combine(members):
+                self._applied_members = members
+                self.toast("Playing on all speakers")
+            else:
+                self.toast("Couldn't combine outputs — see Logs")
+                self._refresh_sink_combo()
+        else:
+            stop_combine()
+            s = self._audio_sinks[idx]
+            set_default_sink(s["name"])
+            self.toast(f"Playing on {s['desc']}")
+
+    def _on_member_toggle(self, name, row):
+        self._member_state[name] = row.get_active()
+        if combine_sink_present():
+            self._apply_combine_live()
+
+    def _apply_combine_live(self):
+        members = self._selected_members()
+        if len(members) >= 2:
+            if start_combine(members):
+                self._applied_members = members
+                self.toast("Updated combined output")
+        else:
+            stop_combine()
+            fb = (members or self._audio_sink_names or [None])[0]
+            if fb:
+                set_default_sink(fb)
+            self._applied_members = []
+            self.toast("Fewer than two outputs — back to single output")
+            self._refresh_sink_combo()
+
+    def _on_sync_delay(self, *_):
+        src = getattr(self, "_sync_src", 0)
+        if src:
+            GLib.source_remove(src)
+        self._sync_src = GLib.timeout_add(400, self._commit_sync_delay)
+
+    def _commit_sync_delay(self):
+        self._sync_src = 0
+        save_sync_delay(self.scale_sync.get_value())
+        if combine_sink_present() and len(self._selected_members()) >= 2:
+            start_combine(self._selected_members())    # reload with the new delay
+        self.toast("Sync delay updated")
+        return False
+
+    def _audio_poll(self):
+        """Keep the device list in step with what's actually connected."""
+        names = [s["name"] for s in audio_sinks()]
+        if names != self._audio_sink_names:
+            self._rebuild_audio_lists()
+            if combine_sink_present():
+                desired = self._selected_members()
+                if desired != self._applied_members:
+                    self._apply_combine_live()
+        return True
 
     # ===== Date & Time =====
     def _datetime_page(self):
