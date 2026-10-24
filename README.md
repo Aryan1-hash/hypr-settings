@@ -7,6 +7,13 @@ you're using.
 
 ![screenshot](docs/screenshot.png)
 
+<p align="center">
+  <img src="docs/screenshots/transparency-terminal.png" width="49%" alt="Transparency controls beside a see-through terminal">
+  <img src="docs/screenshots/transparency-filemanager.png" width="49%" alt="Transparency controls beside a see-through file manager">
+</p>
+
+> The Transparency sliders control exactly what you see beside them — your terminal (kitty) and file manager (Dolphin), live.
+
 ## What it does
 
 - **Waybar** – make the bar hide and slide back in when your mouse hits the top (like the Windows taskbar), tune how sensitive that is, resize its icons, and switch bar layouts with a little preview of each. Auto-hide is remembered across reboots – if you left it on, it comes back on at login.
